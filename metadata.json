@@ -1,0 +1,6 @@
+{
+  "name": "Claude Strategy Dashboard",
+  "description": "A dynamic dashboard for storing and displaying Claude AI strategy sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

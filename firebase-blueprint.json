@@ -1,0 +1,31 @@
+{
+  "entities": {
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "A message pair consisting of a user prompt and AI response.",
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "The user's input prompt."
+        },
+        "response": {
+          "type": "string",
+          "description": "The AI's response in markdown/mermaid format."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The time the message was added."
+        }
+      },
+      "required": ["prompt", "response", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/chats": {
+      "schema": "ChatMessage",
+      "description": "A collection of chat interactions for the main landing page."
+    }
+  }
+}

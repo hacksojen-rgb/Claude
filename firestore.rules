@@ -1,0 +1,39 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email == 'davidwashington7us@gmail.com' && request.auth.token.email_verified == true;
+    }
+
+    function isValidChatMessage(data) {
+      return data.prompt is string && data.prompt.size() <= 10000 &&
+             data.response is string && data.response.size() <= 100000 &&
+             data.timestamp is timestamp;
+    }
+
+    // Chats collection
+    match /chats/{chatId} {
+      allow read: if true; // Publicly viewable on landing page
+      
+      allow create: if isAdmin() && 
+                    isValidChatMessage(request.resource.data) &&
+                    request.resource.data.keys().hasAll(['prompt', 'response', 'timestamp']) &&
+                    request.resource.data.keys().size() == 3;
+                    
+      allow delete: if isAdmin();
+      
+      allow update: if false; // Chats are immutable for simplicity
+    }
+  }
+}
