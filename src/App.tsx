@@ -42,10 +42,16 @@ export default function App() {
   const [promptInput, setPromptInput] = useState('');
   const [responseInput, setResponseInput] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [supabaseConfigMissing, setSupabaseConfigMissing] = useState(false);
 
   // Auth listener
   useEffect(() => {
     const supabase = getSupabase();
+    if (!supabase) {
+      setSupabaseConfigMissing(true);
+      return;
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
     });
@@ -62,6 +68,8 @@ export default function App() {
   // Supabase fetch and Real-time listener
   useEffect(() => {
     const supabase = getSupabase();
+    if (!supabase) return;
+
     const fetchChats = async () => {
       const { data, error } = await supabase
         .from('chats')
@@ -103,6 +111,10 @@ export default function App() {
   const handleLogin = async () => {
     try {
       const supabase = getSupabase();
+      if (!supabase) {
+        alert('Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
+        return;
+      }
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -119,6 +131,7 @@ export default function App() {
   const handleLogout = async () => {
     try {
       const supabase = getSupabase();
+      if (!supabase) return;
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
     } catch (error) {
@@ -132,9 +145,14 @@ export default function App() {
       return;
     }
 
+    const supabase = getSupabase();
+    if (!supabase) {
+      alert('Supabase is not configured.');
+      return;
+    }
+
     setIsAdding(true);
     try {
-      const supabase = getSupabase();
       const { error } = await supabase
         .from('chats')
         .insert([
@@ -162,8 +180,10 @@ export default function App() {
   const handleDeleteChat = async (chatId: string) => {
     if (!window.confirm('Are you sure you want to delete this chat entry?')) return;
     
+    const supabase = getSupabase();
+    if (!supabase) return;
+
     try {
-      const supabase = getSupabase();
       const { error } = await supabase
         .from('chats')
         .delete()
@@ -232,8 +252,9 @@ export default function App() {
             <span className="text-slate-900 font-medium">Strategy Dashboard</span>
           </div>
           <div className="flex items-center gap-4">
-            <span className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full text-xs font-medium">
-              <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>Supabase Online
+            <span className={`flex items-center gap-2 ${supabaseConfigMissing ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'} px-3 py-1 rounded-full text-xs font-medium`}>
+              <span className={`w-2 h-2 ${supabaseConfigMissing ? 'bg-red-500' : 'bg-emerald-500'} rounded-full`}></span>
+              {supabaseConfigMissing ? 'Supabase Missing' : 'Supabase Online'}
             </span>
             {user ? (
               <button 
@@ -256,6 +277,25 @@ export default function App() {
         {/* Scrollable Container */}
         <div className="flex-1 overflow-y-auto bg-slate-50">
           <div className="max-w-5xl mx-auto px-6 py-8 space-y-12 pb-80">
+            {supabaseConfigMissing && (
+              <div className="bg-amber-50 border-l-4 border-amber-400 p-4 mb-8">
+                <div className="flex">
+                  <div className="flex-shrink-0">
+                    <svg className="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M8.485 2.495a1 1 0 011.03 0l7.07 4.083a1 1 0 01.5 1.705L10.03 17.512a1 1 0 01-1.03 0L1.97 12.283a1 1 0 01.5-1.705l7.07-4.083z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <div className="ml-3">
+                    <p className="text-sm text-amber-700 font-medium">
+                      Supabase Configuration Missing:
+                    </p>
+                    <p className="text-sm text-amber-600 mt-1">
+                      Dynamic content (additional prompts) will not load. Please set <code className="bg-amber-100 px-1 rounded">VITE_SUPABASE_URL</code> and <code className="bg-amber-100 px-1 rounded">VITE_SUPABASE_ANON_KEY</code> in your environment variables.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             <StaticInitialContent />
             
             {/* Render Dynamic Chats from Supabase */}

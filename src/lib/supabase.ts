@@ -10,7 +10,8 @@ export const getSupabase = () => {
   if (supabaseClient) return supabaseClient;
   
   if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error('Supabase credentials missing. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your environment variables.');
+    console.warn('Supabase credentials missing. VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set.');
+    return null;
   }
   
   supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
