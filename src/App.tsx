@@ -1,30 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import mermaid from 'mermaid';
-import { 
-  db, 
-  auth, 
-  googleProvider, 
-  OperationType, 
-  handleFirestoreError 
-} from './lib/firebase';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  signOut, 
-  User 
-} from 'firebase/auth';
-import { 
-  collection, 
-  addDoc, 
-  deleteDoc,
-  doc,
-  query, 
-  orderBy, 
-  onSnapshot, 
-  serverTimestamp, 
-  Timestamp 
-} from 'firebase/firestore';
+import { getSupabase } from './lib/supabase';
 import { StaticInitialContent } from './components/StaticContent';
 
 // Mermaid component for rendering diagrams
@@ -51,16 +28,16 @@ const Mermaid = ({ chart }: { chart: string }) => {
   return <div className="mermaid my-6 p-4 bg-white rounded-lg border border-gray-200 overflow-hidden" ref={ref}>{chart}</div>;
 };
 
-// Chat Entry data structure
+// Chat Entry data structure for Supabase
 interface ChatEntry {
   id: string;
   prompt: string;
   response: string;
-  timestamp: Timestamp;
+  created_at: string;
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<any>(null);
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [promptInput, setPromptInput] = useState('');
   const [responseInput, setResponseInput] = useState('');
@@ -68,38 +45,82 @@ export default function App() {
 
   // Auth listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
+    const supabase = getSupabase();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
     });
-    return () => unsubscribe();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Firestore listener
+  // Supabase fetch and Real-time listener
   useEffect(() => {
-    const q = query(collection(db, 'chats'), orderBy('timestamp', 'asc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const chatData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as ChatEntry[];
-      setChats(chatData);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'chats');
-    });
-    return () => unsubscribe();
+    const supabase = getSupabase();
+    const fetchChats = async () => {
+      const { data, error } = await supabase
+        .from('chats')
+        .select('*')
+        .order('created_at', { ascending: true });
+      
+      if (error) {
+        console.error('Error fetching chats:', error);
+      } else {
+        setChats(data || []);
+      }
+    };
+
+    fetchChats();
+
+    // Set up real-time subscription
+    const channel = supabase
+      .channel('chats-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', table: 'chats', schema: 'public' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setChats((prev) => [...prev, payload.new as ChatEntry]);
+          } else if (payload.eventType === 'DELETE') {
+            setChats((prev) => prev.filter((chat) => chat.id !== payload.old.id));
+          } else if (payload.eventType === 'UPDATE') {
+            setChats((prev) => prev.map((chat) => chat.id === payload.new.id ? payload.new as ChatEntry : chat));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   const handleLogin = async () => {
     try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (error) {
+      const supabase = getSupabase();
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
+    } catch (error: any) {
       console.error('Login error:', error);
+      alert(`Login failed: ${error.message || 'Unknown error'}`);
     }
   };
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      const supabase = getSupabase();
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
     } catch (error) {
       console.error('Logout error:', error);
     }
@@ -113,18 +134,26 @@ export default function App() {
 
     setIsAdding(true);
     try {
-      await addDoc(collection(db, 'chats'), {
-        prompt: promptInput,
-        response: responseInput,
-        timestamp: serverTimestamp(),
-      });
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from('chats')
+        .insert([
+          { 
+            prompt: promptInput, 
+            response: responseInput 
+          }
+        ]);
+      
+      if (error) throw error;
+
       setPromptInput('');
       setResponseInput('');
       setTimeout(() => {
         window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
       }, 500);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'chats');
+    } catch (error: any) {
+      console.error('Error adding chat:', error);
+      alert(`Error saving: ${error.message}`);
     } finally {
       setIsAdding(false);
     }
@@ -134,13 +163,20 @@ export default function App() {
     if (!window.confirm('Are you sure you want to delete this chat entry?')) return;
     
     try {
-      await deleteDoc(doc(db, 'chats', chatId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `chats/${chatId}`);
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from('chats')
+        .delete()
+        .eq('id', chatId);
+      
+      if (error) throw error;
+    } catch (error: any) {
+      console.error('Error deleting chat:', error);
+      alert(`Error deleting: ${error.message}`);
     }
   };
 
-  // Function to check if user is the admin
+  const user = session?.user;
   const isAdmin = user?.email === 'davidwashington7us@gmail.com';
 
   return (
@@ -197,7 +233,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full text-xs font-medium">
-              <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>Firebase Online
+              <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>Supabase Online
             </span>
             {user ? (
               <button 
@@ -222,7 +258,7 @@ export default function App() {
           <div className="max-w-5xl mx-auto px-6 py-8 space-y-12 pb-80">
             <StaticInitialContent />
             
-            {/* Render Dynamic Chats from Firestore */}
+            {/* Render Dynamic Chats from Supabase */}
             {chats.map((chat) => (
               <React.Fragment key={chat.id}>
                 {/* User Prompt */}
