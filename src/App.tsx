@@ -34,16 +34,31 @@ interface ChatEntry {
   content: string;
   role: 'user' | 'assistant';
   created_at: string;
+  session_id: string;
+  file_name?: string;
+  file_url?: string;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  created_at: string;
 }
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chats, setChats] = useState<ChatEntry[]>([]);
   const [promptInput, setPromptInput] = useState('');
   const [responseInput, setResponseInput] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
+  const [newChatTitle, setNewChatTitle] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadingFile, setUploadingFile] = useState(false);
 
   // Auth listener
   useEffect(() => {
@@ -60,13 +75,61 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Fetch Sessions
+  useEffect(() => {
+    const fetchSessions = async () => {
+      const { data, error } = await supabase
+        .from('sessions')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (error) {
+        console.error('Error fetching sessions:', error);
+      } else {
+        setSessions(data || []);
+        if (data && data.length > 0 && !activeSessionId) {
+          setActiveSessionId(data[0].id);
+        }
+      }
+    };
+
+    fetchSessions();
+
+    const channel = supabase
+      .channel('sessions-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', table: 'sessions', schema: 'public' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            setSessions((prev) => [payload.new as ChatSession, ...prev]);
+          } else if (payload.eventType === 'DELETE') {
+            setSessions((prev) => prev.filter((s) => s.id !== payload.old.id));
+            if (activeSessionId === payload.old.id) {
+              setActiveSessionId(null);
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [session]);
+
   // Supabase fetch and Real-time listener
   useEffect(() => {
+    if (!activeSessionId) {
+      setChats([]);
+      return;
+    }
+
     const fetchChats = async () => {
-      // User's table name is 'claude' based on screenshots
       const { data, error } = await supabase
         .from('claude')
         .select('*')
+        .eq('session_id', activeSessionId)
         .order('created_at', { ascending: true });
       
       if (error) {
@@ -78,12 +141,11 @@ export default function App() {
 
     fetchChats();
 
-    // Set up real-time subscription
     const channel = supabase
-      .channel('claude-changes')
+      .channel(`claude-session-${activeSessionId}`)
       .on(
         'postgres_changes',
-        { event: '*', table: 'claude', schema: 'public' },
+        { event: '*', table: 'claude', schema: 'public', filter: `session_id=eq.${activeSessionId}` },
         (payload) => {
           if (payload.eventType === 'INSERT') {
             setChats((prev) => [...prev, payload.new as ChatEntry]);
@@ -99,7 +161,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [activeSessionId]);
 
   const handleLogin = async () => {
     try {
@@ -165,31 +227,102 @@ export default function App() {
     }
   };
 
+  const handleCreateSession = async () => {
+    if (!newChatTitle.trim()) return;
+    try {
+      const { data, error } = await supabase
+        .from('sessions')
+        .insert([{ title: newChatTitle, user_id: session.user.id }])
+        .select()
+        .single();
+      
+      if (error) throw error;
+      setActiveSessionId(data.id);
+      setNewChatTitle('');
+      setIsNewChatModalOpen(false);
+    } catch (error: any) {
+      alert(`Error creating chat: ${error.message}`);
+    }
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (!window.confirm('পুরো চ্যাটটি ডিলিট করতে চান?')) return;
+    try {
+      const { error } = await supabase
+        .from('sessions')
+        .delete()
+        .eq('id', id);
+      if (error) throw error;
+    } catch (error: any) {
+      alert(`Error deleting chat: ${error.message}`);
+    }
+  };
+
   const handleAddChat = async () => {
     if (!promptInput.trim() || !responseInput.trim()) {
       alert('প্রম্পট এবং রেসপন্স উভয়ই দিন');
       return;
     }
 
+    if (!activeSessionId) {
+      alert('প্রথমে একটি চ্যাট সেশন সিলেক্ট করুন বা তৈরি করুন');
+      return;
+    }
+
     setIsAdding(true);
+    setUploadingFile(true);
+    
+    let fileUrl = '';
+    let fileName = '';
+
     try {
-      // In the user's 'claude' table, we insert two entries to represent one interaction
+      if (selectedFile) {
+        const fileExt = selectedFile.name.split('.').pop();
+        const uniqueFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
+        
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from('chat_files')
+          .upload(uniqueFileName, selectedFile);
+
+        if (uploadError) throw uploadError;
+
+        const { data: publicUrlData } = supabase.storage
+          .from('chat_files')
+          .getPublicUrl(uniqueFileName);
+
+        fileUrl = publicUrlData.publicUrl;
+        fileName = selectedFile.name;
+      }
+
       const { error } = await supabase
         .from('claude')
         .insert([
-          { content: promptInput, role: 'user' },
-          { content: responseInput, role: 'assistant' }
+          { 
+            content: promptInput, 
+            role: 'user', 
+            session_id: activeSessionId,
+            file_name: fileName || null,
+            file_url: fileUrl || null
+          },
+          { 
+            content: responseInput, 
+            role: 'assistant', 
+            session_id: activeSessionId 
+          }
         ]);
       
       if (error) throw error;
 
       setPromptInput('');
       setResponseInput('');
+      setSelectedFile(null);
     } catch (error: any) {
       console.error('Error adding chat:', error);
       alert(`Error saving: ${error.message}`);
     } finally {
       setIsAdding(false);
+      setUploadingFile(false);
     }
   };
 
@@ -210,59 +343,102 @@ export default function App() {
   };
 
   const user = session?.user;
-  const isAdmin = !!user;
+  const isAdmin = user?.email === 'davidwashington7us@gmail.com';
+
+  // Login Wall Logic
+  const allowedMessagesCount = Math.max(1, Math.ceil(chats.length * 0.1));
+  const visibleChats = user ? chats : chats.slice(0, allowedMessagesCount);
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col border-r border-slate-800 hidden lg:flex">
-        <div className="p-6 flex items-center gap-3 border-b border-slate-800">
-          <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
+      {/* Sidebar - Only show when logged in */}
+      {user && (
+        <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col border-r border-slate-800 hidden lg:flex">
+          <div className="p-6 flex items-center gap-3 border-b border-slate-800">
+            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <span className="font-bold text-white tracking-tight">Claude Strategy</span>
           </div>
-          <span className="font-bold text-white tracking-tight">Claude Strategy</span>
-        </div>
-        <nav className="flex-1 p-4 space-y-1">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">Navigation</div>
-          <a href="#" className="flex items-center gap-3 px-3 py-2 bg-indigo-600 text-white rounded-md">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-            </svg>
-            Dashboard
-          </a>
-          <a href="#" className="flex items-center gap-3 px-3 py-2 hover:bg-slate-800 rounded-md transition-colors">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-            </svg>
-            Sessions
-          </a>
-          <div className="mt-8 text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">Project info</div>
-          <div className="px-3 py-2 text-xs text-slate-400">
-            Current: YouTube Strategy
+          <div className="p-4 border-b border-slate-800">
+            {isAdmin && (
+              <button 
+                onClick={() => setIsNewChatModalOpen(true)}
+                className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-md text-sm font-medium transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                New Chat
+              </button>
+            )}
           </div>
-        </nav>
-        <div className="p-4 border-t border-slate-800 flex items-center gap-3 text-sm">
-          <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center">
-            {user ? user.email?.[0].toUpperCase() : '?'}
+          <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-2">Your Chats</div>
+            {sessions.map((s) => (
+              <div 
+                key={s.id} 
+                className={`group flex items-center justify-between px-3 py-2 rounded-md cursor-pointer transition-colors ${activeSessionId === s.id ? 'bg-indigo-600 text-white' : 'hover:bg-slate-800'}`}
+                onClick={() => setActiveSessionId(s.id)}
+              >
+                <div className="flex items-center gap-3 truncate">
+                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                  </svg>
+                  <span className="truncate text-sm">{s.title}</span>
+                </div>
+                {isAdmin && (
+                  <button 
+                    onClick={(e) => handleDeleteSession(e, s.id)}
+                    className={`opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity ${activeSessionId === s.id ? 'text-indigo-200' : 'text-slate-500'}`}
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
+            
+            {sessions.length === 0 && (
+              <div className="text-center py-8 text-slate-600 text-xs italic">
+                No chats yet. Create one!
+              </div>
+            )}
+          </nav>
+          <div className="p-4 border-t border-slate-800 flex items-center gap-3 text-sm">
+            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-white">
+              {user ? user.email?.[0].toUpperCase() : '?'}
+            </div>
+            <div className="overflow-hidden">
+              <div className="text-white font-medium truncate">{user ? user.email?.split('@')[0] : 'Guest'}</div>
+              <div className="text-slate-500 text-[10px] uppercase font-bold tracking-widest">{isAdmin ? 'Admin' : 'Subscriber'}</div>
+            </div>
           </div>
-          <div className="overflow-hidden">
-            <div className="text-white font-medium truncate">{user ? user.email?.split('@')[0] : 'Guest'}</div>
-            <div className="text-slate-500 text-xs truncate">{user ? 'Admin' : 'Viewer'}</div>
-          </div>
-        </div>
-      </aside>
+        </aside>
+      )}
 
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between z-40 shadow-sm">
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <span className="hover:text-indigo-600 cursor-pointer">Application</span>
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
-            </svg>
-            <span className="text-slate-900 font-medium">Strategy Dashboard</span>
+        <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between z-40 shadow-sm sticky top-0">
+          <div className="flex items-center gap-2">
+            {!user && (
+              <div className="flex items-center gap-3 mr-4 py-1.5 px-3 bg-slate-100 rounded-lg">
+                <div className="w-6 h-6 rounded bg-indigo-600 flex items-center justify-center">
+                  <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                </div>
+                <span className="text-slate-900 font-bold text-sm tracking-tight">Claude Strategy Hub</span>
+              </div>
+            )}
+            {activeSessionId && (
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <span className="text-slate-900 font-semibold">{sessions.find(s => s.id === activeSessionId)?.title}</span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {user ? (
@@ -322,78 +498,195 @@ export default function App() {
           </div>
         </header>
 
-        {/* Scrollable Container */}
         <div className="flex-1 overflow-y-auto bg-slate-50">
           <div className="max-w-5xl mx-auto px-6 py-8 space-y-12 pb-80">
-            <StaticInitialContent />
+            
+            {/* Show grid when not logged in and no session active */}
+            {!user && !activeSessionId && (
+              <div className="py-8">
+                <div className="text-center mb-12">
+                  <h1 className="text-3xl font-extrabold text-slate-900 mb-2">এক্সক্লুসিভ স্ট্র্যাটেজি সমূহ</h1>
+                  <p className="text-slate-500">নিচের যেকোনো একটি চ্যাট সেশন সিলেক্ট করে স্ট্র্যাটেজি পড়ুন</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {sessions.map((s) => (
+                    <div 
+                      key={s.id} 
+                      onClick={() => setActiveSessionId(s.id)}
+                      className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 cursor-pointer hover:shadow-xl hover:border-indigo-300 transition-all group"
+                    >
+                      <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                        </svg>
+                      </div>
+                      <h3 className="text-xl font-bold text-slate-800 mb-3 leading-snug">{s.title || "Untitled Chat"}</h3>
+                      <div className="flex items-center text-indigo-600 font-bold text-sm">
+                        <span>পড়ুন</span>
+                        <svg className="w-4 h-4 ml-1 transform group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                        </svg>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {activeSessionId && !user && (
+              <button 
+                onClick={() => setActiveSessionId(null)} 
+                className="mb-8 flex items-center gap-2 text-sm font-bold text-indigo-600 hover:text-indigo-800"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                </svg>
+                ← সব চ্যাটে ফিরে যান
+              </button>
+            )}
+
+            {chats.length === 0 && !activeSessionId && user && (
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <div className="w-20 h-20 bg-indigo-50 text-indigo-500 rounded-full flex items-center justify-center mb-6">
+                  <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                </div>
+                <h2 className="text-2xl font-bold text-slate-800 mb-2">Welcome to Claude Strategy</h2>
+                <p className="text-slate-500 max-w-md">বামপাশের সাইডবার থেকে একটি সেশন সিলেক্ট করুন অথবা নতুন একটি চ্যাট শুরু করুন।</p>
+                <button 
+                  onClick={() => setIsNewChatModalOpen(true)}
+                  className="mt-6 bg-indigo-600 text-white px-6 py-3 rounded-xl font-semibold shadow-lg hover:bg-indigo-700 transition-all"
+                >
+                  নতুন চ্যাট শুরু করুন
+                </button>
+              </div>
+            )}
+
+            {chats.length === 0 && activeSessionId && (
+              <StaticInitialContent />
+            )}
             
             {/* Render Dynamic Chats from Supabase 'claude' table */}
-            {chats.map((chat) => (
-              <React.Fragment key={chat.id}>
-                {chat.role === 'user' ? (
-                  /* User Prompt */
-                  <div className="flex justify-end pl-12">
-                    <div className="flex flex-col items-end max-w-3xl">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-sm font-semibold text-slate-700">Sobuj</span>
-                        <div className="w-6 h-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">S</div>
-                        {isAdmin && (
-                          <button 
-                            onClick={() => handleDeleteChat(chat.id)}
-                            className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
-                            title="Delete Message"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
-                            </svg>
-                          </button>
+            <div className="relative">
+              {visibleChats.map((chat) => (
+                <React.Fragment key={chat.id}>
+                  {chat.role === 'user' ? (
+                    /* User Prompt */
+                    <div className="flex justify-end pl-12 mb-12 last:mb-0">
+                      <div className="flex flex-col items-end max-w-3xl">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-semibold text-slate-700">Sobuj</span>
+                          <div className="w-6 h-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">S</div>
+                          {isAdmin && (
+                            <button 
+                              onClick={() => handleDeleteChat(chat.id)}
+                              className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
+                              title="Delete Message"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                        
+                        {chat.file_url && (
+                          <div className="flex items-center gap-3 p-3 mb-3 bg-white border border-slate-200 rounded-xl w-max max-w-sm shadow-sm">
+                            <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600">
+                              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                              </svg>
+                            </div>
+                            <div className="flex flex-col min-w-0">
+                              <span className="text-sm font-semibold text-slate-800 truncate w-40">{chat.file_name}</span>
+                              <span className="text-[10px] text-slate-500 font-bold uppercase">Attached File</span>
+                            </div>
+                            <a 
+                              href={chat.file_url} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="ml-2 p-2 bg-slate-50 text-indigo-600 hover:bg-slate-100 rounded-full transition-colors"
+                              title="Download/View File"
+                            >
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                              </svg>
+                            </a>
+                          </div>
                         )}
-                      </div>
-                      <div className="prompt-bubble p-5 text-base md:text-lg whitespace-pre-wrap tracking-wide">
-                        {chat.content}
+
+                        <div className="prompt-bubble p-5 text-base md:text-lg whitespace-pre-wrap tracking-wide">
+                          {chat.content}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  /* AI Response */
-                  <div className="flex justify-start pr-12">
-                    <div className="flex flex-col items-start max-w-4xl w-full">
-                      <div className="flex items-center gap-2 mb-1">
-                        <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-indigo-600 text-xs font-bold border border-slate-200">C</div>
-                        <span className="text-sm font-semibold text-slate-700">Claude Sonnet 4.6</span>
-                        {isAdmin && (
-                          <button 
-                            onClick={() => handleDeleteChat(chat.id)}
-                            className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
-                            title="Delete Message"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                      <div className="response-bubble p-6 md:p-8 w-full block prose prose-indigo max-w-none">
-                        {chat.content.split('\n').some(line => line.includes('```mermaid')) ? (
-                          chat.content.split('```mermaid').map((part, index) => {
-                            if (index === 0) return <ReactMarkdown key={index}>{part}</ReactMarkdown>;
-                            const [chart, ...rest] = part.split('```');
-                            return (
-                              <React.Fragment key={index}>
-                                <Mermaid chart={chart} />
-                                <ReactMarkdown>{rest.join('```')}</ReactMarkdown>
-                              </React.Fragment>
-                            );
-                          })
-                        ) : (
-                          <ReactMarkdown>{chat.content}</ReactMarkdown>
-                        )}
+                  ) : (
+                    /* AI Response */
+                    <div className="flex justify-start pr-12 mb-12 last:mb-0">
+                      <div className="flex flex-col items-start max-w-4xl w-full">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-indigo-600 text-xs font-bold border border-slate-200">C</div>
+                          <span className="text-sm font-semibold text-slate-700">Claude Sonnet 4.6</span>
+                          {isAdmin && (
+                            <button 
+                              onClick={() => handleDeleteChat(chat.id)}
+                              className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
+                              title="Delete Message"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                        <div className="response-bubble p-6 md:p-8 w-full block prose prose-indigo max-w-none">
+                          {chat.content.split('\n').some(line => line.includes('```mermaid')) ? (
+                            chat.content.split('```mermaid').map((part, index) => {
+                              if (index === 0) return <ReactMarkdown key={index}>{part}</ReactMarkdown>;
+                              const [chart, ...rest] = part.split('```');
+                              return (
+                                <React.Fragment key={index}>
+                                  <Mermaid chart={chart} />
+                                  <ReactMarkdown>{rest.join('```')}</ReactMarkdown>
+                                </React.Fragment>
+                              );
+                            })
+                          ) : (
+                            <ReactMarkdown>{chat.content}</ReactMarkdown>
+                          )}
+                        </div>
                       </div>
                     </div>
+                  )}
+                </React.Fragment>
+              ))}
+
+              {/* Login Wall Banner */}
+              {!user && chats.length > allowedMessagesCount && (
+                <div className="absolute bottom-0 left-0 w-full h-[600px] bg-gradient-to-t from-slate-50 via-slate-50/95 to-transparent flex flex-col items-center justify-end pb-20 pointer-events-none">
+                  <div className="bg-white/90 backdrop-blur-md p-8 rounded-3xl shadow-2xl border border-slate-200 max-w-lg w-full text-center transform transition-all pointer-events-auto">
+                    <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                      <svg className="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                      </svg>
+                    </div>
+                    <h3 className="text-2xl font-bold text-slate-900 mb-3">সম্পূর্ণ চ্যাট আনলক করুন</h3>
+                    <p className="text-slate-600 mb-8 leading-relaxed">
+                      এই চ্যাটের সম্পূর্ণ স্ট্র্যাটেজি এবং ফাইল দেখতে এখনই ফ্রিতে লগইন বা রেজিস্ট্রেশন করুন।
+                    </p>
+                    
+                    <button 
+                      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} 
+                      className="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl hover:bg-indigo-700 shadow-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+                    >
+                      লগইন / রেজিস্ট্রেশন করুন
+                    </button>
+                    <p className="mt-4 text-xs text-slate-400">মাত্র কয়েক সেকেন্ড সময় লাগবে!</p>
                   </div>
-                )}
-              </React.Fragment>
-            ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -406,6 +699,33 @@ export default function App() {
                   <div className="w-2 h-6 bg-indigo-500 rounded-full"></div>
                   নতুন কনভারসেশন যোগ করুন (Admin)
                 </h3>
+
+                <div className="flex items-center gap-4">
+                  <label className="cursor-pointer group">
+                    <input 
+                      type="file" 
+                      className="hidden" 
+                      onChange={(e) => setSelectedFile(e.target.files ? e.target.files[0] : null)}
+                    />
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-600 group-hover:bg-indigo-50 group-hover:border-indigo-200 group-hover:text-indigo-600 transition-all">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                      </svg>
+                      {selectedFile ? selectedFile.name : 'ফাইল আপলোড করুন'}
+                    </div>
+                  </label>
+                  {selectedFile && (
+                    <button 
+                      onClick={() => setSelectedFile(null)}
+                      className="text-red-400 hover:text-red-600"
+                      title="ফাইল বাদ দিন"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
               </div>
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -432,11 +752,11 @@ export default function App() {
               <div className="mt-6 flex justify-end">
                 <button 
                   onClick={handleAddChat}
-                  disabled={isAdding}
+                  disabled={isAdding || uploadingFile}
                   className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-8 rounded-lg transition duration-200 shadow-lg flex items-center gap-2 disabled:opacity-50"
                 >
-                  {isAdding ? (
-                    'যোগ করা হচ্ছে...'
+                  {isAdding || uploadingFile ? (
+                    'প্রসেসিং হচ্ছে...'
                   ) : (
                     <>
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -451,6 +771,49 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* New Chat Modal */}
+      {isNewChatModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900">নতুন চ্যাট সেশন</h3>
+              <button onClick={() => setIsNewChatModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">চ্যাটের নাম</label>
+                <input 
+                  type="text" 
+                  value={newChatTitle}
+                  onChange={(e) => setNewChatTitle(e.target.value)}
+                  placeholder="যেমন: YouTube SEO Strategy"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="p-6 bg-slate-50 flex gap-3">
+              <button 
+                onClick={() => setIsNewChatModalOpen(false)}
+                className="flex-1 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                বাতিল
+              </button>
+              <button 
+                onClick={handleCreateSession}
+                className="flex-1 py-3 bg-indigo-600 text-white text-sm font-semibold rounded-xl shadow-lg hover:bg-indigo-700 transition-colors"
+              >
+                তৈরি করুন
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
