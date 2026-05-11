@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import mermaid from 'mermaid';
-import { getSupabase } from './lib/supabase';
+import { supabase } from './lib/supabase';
 import { StaticInitialContent } from './components/StaticContent';
 
 // Mermaid component for rendering diagrams
@@ -42,16 +42,11 @@ export default function App() {
   const [promptInput, setPromptInput] = useState('');
   const [responseInput, setResponseInput] = useState('');
   const [isAdding, setIsAdding] = useState(false);
-  const [supabaseConfigMissing, setSupabaseConfigMissing] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
 
   // Auth listener
   useEffect(() => {
-    const supabase = getSupabase();
-    if (!supabase) {
-      setSupabaseConfigMissing(true);
-      return;
-    }
-
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
     });
@@ -67,9 +62,6 @@ export default function App() {
 
   // Supabase fetch and Real-time listener
   useEffect(() => {
-    const supabase = getSupabase();
-    if (!supabase) return;
-
     const fetchChats = async () => {
       // User's table name is 'claude' based on screenshots
       const { data, error } = await supabase
@@ -111,28 +103,61 @@ export default function App() {
 
   const handleLogin = async () => {
     try {
-      const supabase = getSupabase();
-      if (!supabase) {
-        alert('Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
-        return;
-      }
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
           redirectTo: window.location.origin
         }
       });
+
       if (error) throw error;
     } catch (error: any) {
-      console.error('Login error:', error);
-      alert(`Login failed: ${error.message || 'Unknown error'}`);
+      console.error('Login Error:', error);
+      alert(`লগইন সমস্যা: ${error.message || 'API Key missing or invalid'}`);
+    }
+  };
+
+  const handleEmailLogin = async () => {
+    if (!email || !password) {
+      alert('ইমেইল এবং পাসওয়ার্ড দিন');
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (error) throw error;
+      setEmail('');
+      setPassword('');
+    } catch (error: any) {
+      console.error('Login Error:', error);
+      alert(`লগইন সমস্যা: ${error.message}`);
+    }
+  };
+
+  const handleSignUp = async () => {
+    if (!email || !password) {
+      alert('ইমেইল এবং পাসওয়ার্ড দিন');
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+      });
+      if (error) throw error;
+      alert('সফলভাবে অ্যাকাউন্ট তৈরি হয়েছে! এখন লগইন করতে পারেন।');
+      setEmail('');
+      setPassword('');
+    } catch (error: any) {
+      console.error('Signup Error:', error);
+      alert(`অ্যাকাউন্ট তৈরিতে সমস্যা: ${error.message}`);
     }
   };
 
   const handleLogout = async () => {
     try {
-      const supabase = getSupabase();
-      if (!supabase) return;
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
     } catch (error) {
@@ -143,12 +168,6 @@ export default function App() {
   const handleAddChat = async () => {
     if (!promptInput.trim() || !responseInput.trim()) {
       alert('প্রম্পট এবং রেসপন্স উভয়ই দিন');
-      return;
-    }
-
-    const supabase = getSupabase();
-    if (!supabase) {
-      alert('Supabase is not configured.');
       return;
     }
 
@@ -177,9 +196,6 @@ export default function App() {
   const handleDeleteChat = async (chatId: string) => {
     if (!window.confirm('Are you sure you want to delete this specific message?')) return;
     
-    const supabase = getSupabase();
-    if (!supabase) return;
-
     try {
       const { error } = await supabase
         .from('claude')
@@ -194,7 +210,7 @@ export default function App() {
   };
 
   const user = session?.user;
-  const isAdmin = user?.email === 'davidwashington7us@gmail.com';
+  const isAdmin = !!user;
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden">
@@ -248,25 +264,60 @@ export default function App() {
             </svg>
             <span className="text-slate-900 font-medium">Strategy Dashboard</span>
           </div>
-          <div className="flex items-center gap-4">
-            <span className={`flex items-center gap-2 ${supabaseConfigMissing ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'} px-3 py-1 rounded-full text-xs font-medium`}>
-              <span className={`w-2 h-2 ${supabaseConfigMissing ? 'bg-red-500' : 'bg-emerald-500'} rounded-full`}></span>
-              {supabaseConfigMissing ? 'Supabase Missing' : 'Supabase Online'}
-            </span>
+          <div className="flex items-center gap-2">
             {user ? (
-              <button 
-                onClick={handleLogout}
-                className="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-50 transition-colors"
-              >
-                Logout
-              </button>
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-slate-700 hidden sm:inline">{user.email}</span>
+                <button 
+                  onClick={handleLogout}
+                  className="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-50 transition-colors"
+                >
+                  Logout
+                </button>
+              </div>
             ) : (
-              <button 
-                onClick={handleLogin}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm font-medium shadow-sm hover:bg-indigo-700 transition-colors"
-              >
-                Admin Login
-              </button>
+              <div className="flex flex-col sm:flex-row items-center gap-2">
+                <div className="flex gap-2">
+                  <input 
+                    type="email" 
+                    placeholder="Email" 
+                    className="w-32 sm:w-40 px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
+                  <input 
+                    type="password" 
+                    placeholder="Password" 
+                    className="w-32 sm:w-40 px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={handleEmailLogin}
+                    className="bg-indigo-600 text-white px-3 py-2 rounded-md text-xs font-medium shadow-sm hover:bg-indigo-700 transition-colors"
+                  >
+                    লগইন
+                  </button>
+                  <button 
+                    onClick={handleSignUp}
+                    className="bg-slate-600 text-white px-3 py-2 rounded-md text-xs font-medium shadow-sm hover:bg-slate-700 transition-colors"
+                  >
+                    রেজিস্ট্রেশন
+                  </button>
+                  <button 
+                    onClick={handleLogin}
+                    className="bg-white border border-slate-200 text-slate-700 px-3 py-2 rounded-md text-xs font-medium hover:bg-slate-50 transition-colors flex items-center gap-1"
+                    title="Google Login"
+                  >
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12.48 10.92v3.28h7.84c-.24 1.84-.92 3.36-2 4.48-1.56 1.56-3.8 3.2-7.84 3.2-6.4 0-11.4-5.12-11.4-11.52s5.04-11.52 11.4-11.52c3.48 0 6.08 1.4 7.96 3.16l2.32-2.32c-2.4-2.28-5.64-3.92-10.28-3.92-8.52 0-15.48 6.96-15.48 15.48s6.96 15.48 15.48 15.48c4.64 0 8.08-1.52 10.84-4.4 2.84-2.84 3.72-6.84 3.72-10.2 0-.68-.04-1.36-.12-2.04h-14.44z"/>
+                    </svg>
+                    Google
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </header>
@@ -274,25 +325,6 @@ export default function App() {
         {/* Scrollable Container */}
         <div className="flex-1 overflow-y-auto bg-slate-50">
           <div className="max-w-5xl mx-auto px-6 py-8 space-y-12 pb-80">
-            {supabaseConfigMissing && (
-              <div className="bg-amber-50 border-l-4 border-amber-400 p-4 mb-8">
-                <div className="flex">
-                  <div className="flex-shrink-0">
-                    <svg className="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M8.485 2.495a1 1 0 011.03 0l7.07 4.083a1 1 0 01.5 1.705L10.03 17.512a1 1 0 01-1.03 0L1.97 12.283a1 1 0 01.5-1.705l7.07-4.083z" clipRule="evenodd" />
-                    </svg>
-                  </div>
-                  <div className="ml-3">
-                    <p className="text-sm text-amber-700 font-medium">
-                      Supabase Configuration Missing:
-                    </p>
-                    <p className="text-sm text-amber-600 mt-1">
-                      Dynamic content (additional prompts) will not load. Please set <code className="bg-amber-100 px-1 rounded">VITE_SUPABASE_URL</code> and <code className="bg-amber-100 px-1 rounded">VITE_SUPABASE_ANON_KEY</code> in your environment variables.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
             <StaticInitialContent />
             
             {/* Render Dynamic Chats from Supabase 'claude' table */}
