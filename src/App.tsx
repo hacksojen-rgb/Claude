@@ -28,11 +28,11 @@ const Mermaid = ({ chart }: { chart: string }) => {
   return <div className="mermaid my-6 p-4 bg-white rounded-lg border border-gray-200 overflow-hidden" ref={ref}>{chart}</div>;
 };
 
-// Chat Entry data structure for Supabase
+// Chat Entry data structure for Supabase 'claude' table
 interface ChatEntry {
   id: string;
-  prompt: string;
-  response: string;
+  content: string;
+  role: 'user' | 'assistant';
   created_at: string;
 }
 
@@ -71,8 +71,9 @@ export default function App() {
     if (!supabase) return;
 
     const fetchChats = async () => {
+      // User's table name is 'claude' based on screenshots
       const { data, error } = await supabase
-        .from('chats')
+        .from('claude')
         .select('*')
         .order('created_at', { ascending: true });
       
@@ -87,10 +88,10 @@ export default function App() {
 
     // Set up real-time subscription
     const channel = supabase
-      .channel('chats-changes')
+      .channel('claude-changes')
       .on(
         'postgres_changes',
-        { event: '*', table: 'chats', schema: 'public' },
+        { event: '*', table: 'claude', schema: 'public' },
         (payload) => {
           if (payload.eventType === 'INSERT') {
             setChats((prev) => [...prev, payload.new as ChatEntry]);
@@ -141,7 +142,7 @@ export default function App() {
 
   const handleAddChat = async () => {
     if (!promptInput.trim() || !responseInput.trim()) {
-      alert('Please provide both prompt and response.');
+      alert('প্রম্পট এবং রেসপন্স উভয়ই দিন');
       return;
     }
 
@@ -153,22 +154,18 @@ export default function App() {
 
     setIsAdding(true);
     try {
+      // In the user's 'claude' table, we insert two entries to represent one interaction
       const { error } = await supabase
-        .from('chats')
+        .from('claude')
         .insert([
-          { 
-            prompt: promptInput, 
-            response: responseInput 
-          }
+          { content: promptInput, role: 'user' },
+          { content: responseInput, role: 'assistant' }
         ]);
       
       if (error) throw error;
 
       setPromptInput('');
       setResponseInput('');
-      setTimeout(() => {
-        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      }, 500);
     } catch (error: any) {
       console.error('Error adding chat:', error);
       alert(`Error saving: ${error.message}`);
@@ -178,14 +175,14 @@ export default function App() {
   };
 
   const handleDeleteChat = async (chatId: string) => {
-    if (!window.confirm('Are you sure you want to delete this chat entry?')) return;
+    if (!window.confirm('Are you sure you want to delete this specific message?')) return;
     
     const supabase = getSupabase();
     if (!supabase) return;
 
     try {
       const { error } = await supabase
-        .from('chats')
+        .from('claude')
         .delete()
         .eq('id', chatId);
       
@@ -298,59 +295,71 @@ export default function App() {
             )}
             <StaticInitialContent />
             
-            {/* Render Dynamic Chats from Supabase */}
+            {/* Render Dynamic Chats from Supabase 'claude' table */}
             {chats.map((chat) => (
               <React.Fragment key={chat.id}>
-                {/* User Prompt */}
-                <div className="flex justify-end pl-12">
-                  <div className="flex flex-col items-end max-w-3xl">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-semibold text-slate-700">Sobuj</span>
-                      <div className="w-6 h-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">S</div>
-                      {isAdmin && (
-                        <button 
-                          onClick={() => handleDeleteChat(chat.id)}
-                          className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
-                          title="Delete Chat"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      )}
-                    </div>
-                    <div className="prompt-bubble p-5 text-base md:text-lg whitespace-pre-wrap tracking-wide">
-                      {chat.prompt}
-                    </div>
-                  </div>
-                </div>
-
-                {/* AI Response */}
-                <div className="flex justify-start pr-12">
-                  <div className="flex flex-col items-start max-w-4xl w-full">
-                    <div className="flex items-center gap-2 mb-1">
-                      <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-indigo-600 text-xs font-bold border border-slate-200">C</div>
-                      <span className="text-sm font-semibold text-slate-700">Claude Sonnet 4.6</span>
-                    </div>
-                    <div className="response-bubble p-6 md:p-8 w-full block prose prose-indigo max-w-none">
-                      {/* Handling Mermaid diagrams specifically */}
-                      {chat.response.split('\n').some(line => line.includes('```mermaid')) ? (
-                        chat.response.split('```mermaid').map((part, index) => {
-                          if (index === 0) return <ReactMarkdown key={index}>{part}</ReactMarkdown>;
-                          const [chart, ...rest] = part.split('```');
-                          return (
-                            <React.Fragment key={index}>
-                              <Mermaid chart={chart} />
-                              <ReactMarkdown>{rest.join('```')}</ReactMarkdown>
-                            </React.Fragment>
-                          );
-                        })
-                      ) : (
-                        <ReactMarkdown>{chat.response}</ReactMarkdown>
-                      )}
+                {chat.role === 'user' ? (
+                  /* User Prompt */
+                  <div className="flex justify-end pl-12">
+                    <div className="flex flex-col items-end max-w-3xl">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-semibold text-slate-700">Sobuj</span>
+                        <div className="w-6 h-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-xs font-bold">S</div>
+                        {isAdmin && (
+                          <button 
+                            onClick={() => handleDeleteChat(chat.id)}
+                            className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
+                            title="Delete Message"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                      <div className="prompt-bubble p-5 text-base md:text-lg whitespace-pre-wrap tracking-wide">
+                        {chat.content}
+                      </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  /* AI Response */
+                  <div className="flex justify-start pr-12">
+                    <div className="flex flex-col items-start max-w-4xl w-full">
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-indigo-600 text-xs font-bold border border-slate-200">C</div>
+                        <span className="text-sm font-semibold text-slate-700">Claude Sonnet 4.6</span>
+                        {isAdmin && (
+                          <button 
+                            onClick={() => handleDeleteChat(chat.id)}
+                            className="ml-2 text-slate-400 hover:text-red-500 transition-colors p-1"
+                            title="Delete Message"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1-1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+                      <div className="response-bubble p-6 md:p-8 w-full block prose prose-indigo max-w-none">
+                        {chat.content.split('\n').some(line => line.includes('```mermaid')) ? (
+                          chat.content.split('```mermaid').map((part, index) => {
+                            if (index === 0) return <ReactMarkdown key={index}>{part}</ReactMarkdown>;
+                            const [chart, ...rest] = part.split('```');
+                            return (
+                              <React.Fragment key={index}>
+                                <Mermaid chart={chart} />
+                                <ReactMarkdown>{rest.join('```')}</ReactMarkdown>
+                              </React.Fragment>
+                            );
+                          })
+                        ) : (
+                          <ReactMarkdown>{chat.content}</ReactMarkdown>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </React.Fragment>
             ))}
           </div>
